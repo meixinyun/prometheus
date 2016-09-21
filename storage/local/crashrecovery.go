@@ -25,6 +25,7 @@ import (
 	"github.com/prometheus/common/log"
 	"github.com/prometheus/common/model"
 
+	"github.com/prometheus/prometheus/storage/local/chunk"
 	"github.com/prometheus/prometheus/storage/local/codable"
 	"github.com/prometheus/prometheus/storage/local/index"
 )
@@ -114,7 +115,7 @@ func (p *persistence) recoverFromCrash(fingerprintToSeries map[model.Fingerprint
 					)
 				}
 				s.chunkDescs = append(
-					make([]*ChunkDesc, 0, len(s.chunkDescs)-s.persistWatermark),
+					make([]*chunk.ChunkDesc, 0, len(s.chunkDescs)-s.persistWatermark),
 					s.chunkDescs[s.persistWatermark:]...,
 				)
 				numMemChunkDescs.Sub(float64(s.persistWatermark))
@@ -290,8 +291,8 @@ func (p *persistence) sanitizeSeries(
 			)
 			s.chunkDescs = cds
 			s.chunkDescsOffset = 0
-			s.savedFirstTime = cds[0].firstTime()
-			s.lastTime, err = cds[len(cds)-1].lastTime()
+			s.savedFirstTime = cds[0].FirstTime()
+			s.lastTime, err = cds[len(cds)-1].LastTime()
 			if err != nil {
 				log.Errorf(
 					"Failed to determine time of the last sample for metric %v, fingerprint %v: %s",
@@ -326,10 +327,10 @@ func (p *persistence) sanitizeSeries(
 		}
 		s.persistWatermark = len(cds)
 		s.chunkDescsOffset = 0
-		s.savedFirstTime = cds[0].firstTime()
+		s.savedFirstTime = cds[0].FirstTime()
 		s.modTime = modTime
 
-		lastTime, err := cds[len(cds)-1].lastTime()
+		lastTime, err := cds[len(cds)-1].LastTime()
 		if err != nil {
 			log.Errorf(
 				"Failed to determine time of the last sample for metric %v, fingerprint %v: %s",
@@ -340,7 +341,7 @@ func (p *persistence) sanitizeSeries(
 		}
 		keepIdx := -1
 		for i, cd := range s.chunkDescs {
-			if cd.firstTime() >= lastTime {
+			if cd.FirstTime() >= lastTime {
 				keepIdx = i
 				break
 			}

@@ -29,13 +29,13 @@ import (
 	"github.com/prometheus/common/model"
 	"golang.org/x/net/context"
 
+	"github.com/prometheus/prometheus/storage/local/chunk"
 	"github.com/prometheus/prometheus/storage/metric"
 )
 
 const (
 	evictRequestsCap      = 1024
 	quarantineRequestsCap = 1024
-	chunkLen              = 1024
 
 	// See waitForNextFP.
 	fpMaxSweepTime    = 6 * time.Hour
@@ -88,11 +88,6 @@ var (
 		nil, nil,
 	)
 )
-
-type evictRequest struct {
-	cd    *ChunkDesc
-	evict bool
-}
 
 type quarantineRequest struct {
 	fp     model.Fingerprint
@@ -171,7 +166,7 @@ type MemorySeriesStorage struct {
 	mapper      *fpMapper
 
 	evictList                   *list.List
-	evictRequests               chan evictRequest
+	evictRequests               chan chunk.EvictRequest
 	evictStopping, evictStopped chan struct{}
 
 	quarantineRequests                    chan quarantineRequest
@@ -226,7 +221,7 @@ func NewMemorySeriesStorage(o *MemorySeriesStorageOptions) *MemorySeriesStorage 
 		maxChunksToPersist: o.MaxChunksToPersist,
 
 		evictList:     list.New(),
-		evictRequests: make(chan evictRequest, evictRequestsCap),
+		evictRequests: make(chan chunk.EvictRequest, evictRequestsCap),
 		evictStopping: make(chan struct{}),
 		evictStopped:  make(chan struct{}),
 
@@ -833,7 +828,7 @@ func (s *MemorySeriesStorage) logThrottling() {
 func (s *MemorySeriesStorage) getOrCreateSeries(fp model.Fingerprint, m model.Metric) (*memorySeries, error) {
 	series, ok := s.fpToSeries.get(fp)
 	if !ok {
-		var cds []*ChunkDesc
+		var cds []*chunk.ChunkDesc
 		var modTime time.Time
 		unarchived, err := s.persistence.unarchiveMetric(fp)
 		if err != nil {
@@ -936,17 +931,17 @@ func (s *MemorySeriesStorage) handleEvictList() {
 		// evict run is more than maxMemoryChunks/1000.
 		select {
 		case req := <-s.evictRequests:
-			if req.evict {
-				req.cd.evictListElement = s.evictList.PushBack(req.cd)
+			if req.Evict {
+				req.CD.EvictListElement = s.evictList.PushBack(req.CD)
 				count++
 				if count > s.maxMemoryChunks/1000 {
 					s.maybeEvict()
 					count = 0
 				}
 			} else {
-				if req.cd.evictListElement != nil {
-					s.evictList.Remove(req.cd.evictListElement)
-					req.cd.evictListElement = nil
+				if req.CD.EvictListElement != nil {
+					s.evictList.Remove(req.CD.EvictListElement)
+					req.CD.EvictListElement = nil
 				}
 			}
 		case <-ticker.C:
@@ -975,19 +970,19 @@ func (s *MemorySeriesStorage) maybeEvict() {
 	if numChunksToEvict <= 0 {
 		return
 	}
-	chunkDescsToEvict := make([]*ChunkDesc, numChunksToEvict)
+	chunkDescsToEvict := make([]*chunk.ChunkDesc, numChunksToEvict)
 	for i := range chunkDescsToEvict {
 		e := s.evictList.Front()
 		if e == nil {
 			break
 		}
-		cd := e.Value.(*ChunkDesc)
-		cd.evictListElement = nil
+		cd := e.Value.(*chunk.ChunkDesc)
+		cd.EvictListElement = nil
 		chunkDescsToEvict[i] = cd
 		s.evictList.Remove(e)
 	}
 	// Do the actual eviction in a goroutine as we might otherwise deadlock,
-	// in the following way: A chunk was unpinned completely and therefore
+	// in the following way: A chunk was Unpinned completely and therefore
 	// scheduled for eviction. At the time we actually try to evict it,
 	// another goroutine is pinning the chunk. The pinning goroutine has
 	// currently locked the chunk and tries to send the evict request (to
@@ -1000,10 +995,10 @@ func (s *MemorySeriesStorage) maybeEvict() {
 			if cd == nil {
 				break
 			}
-			cd.maybeEvict()
+			cd.MaybeEvict()
 			// We don't care if the eviction succeeds. If the chunk
 			// was pinned in the meantime, it will be added to the
-			// evict list once it gets unpinned again.
+			// evict list once it gets Unpinned again.
 		}
 	}()
 }
@@ -1258,7 +1253,7 @@ func (s *MemorySeriesStorage) maintainMemorySeries(
 
 	iOldestNotEvicted := -1
 	for i, cd := range series.chunkDescs {
-		if !cd.isEvicted() {
+		if !cd.IsEvicted() {
 			iOldestNotEvicted = i
 			break
 		}
@@ -1316,7 +1311,7 @@ func (s *MemorySeriesStorage) writeMemorySeries(
 		// that belong to a series that is scheduled for quarantine
 		// anyway.
 		for _, cd := range cds {
-			cd.unpin(s.evictRequests)
+			cd.Unpin(s.evictRequests)
 		}
 		s.incNumChunksToPersist(-len(cds))
 		chunkOps.WithLabelValues(persistAndUnpin).Add(float64(len(cds)))
@@ -1325,9 +1320,9 @@ func (s *MemorySeriesStorage) writeMemorySeries(
 
 	// Get the actual chunks from underneath the chunkDescs.
 	// No lock required as chunks still to persist cannot be evicted.
-	chunks := make([]Chunk, len(cds))
+	chunks := make([]chunk.Chunk, len(cds))
 	for i, cd := range cds {
-		chunks[i] = cd.c
+		chunks[i] = cd.C
 	}
 
 	if !series.FirstTime().Before(beforeTime) {
@@ -1413,12 +1408,12 @@ func (s *MemorySeriesStorage) maintainArchivedSeries(fp model.Fingerprint, befor
 }
 
 // See persistence.loadChunks for detailed explanation.
-func (s *MemorySeriesStorage) loadChunks(fp model.Fingerprint, indexes []int, indexOffset int) ([]Chunk, error) {
+func (s *MemorySeriesStorage) loadChunks(fp model.Fingerprint, indexes []int, indexOffset int) ([]chunk.Chunk, error) {
 	return s.persistence.loadChunks(fp, indexes, indexOffset)
 }
 
 // See persistence.loadChunkDescs for detailed explanation.
-func (s *MemorySeriesStorage) loadChunkDescs(fp model.Fingerprint, offsetFromEnd int) ([]*ChunkDesc, error) {
+func (s *MemorySeriesStorage) loadChunkDescs(fp model.Fingerprint, offsetFromEnd int) ([]*chunk.ChunkDesc, error) {
 	return s.persistence.loadChunkDescs(fp, offsetFromEnd)
 }
 

@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package local
+package chunk
 
 import (
 	"encoding/binary"
@@ -195,11 +195,11 @@ const (
 	varbitFirstValueDeltaOffset     = 38
 	// The following are in the "footer" and only usable if the chunk is
 	// still open.
-	varbitCountOffsetBitOffset           = chunkLen - 9
-	varbitLastTimeDeltaOffset            = chunkLen - 7
-	varbitLastValueDeltaOffset           = chunkLen - 4
-	varbitLastLeadingZerosCountOffset    = chunkLen - 4
-	varbitLastSignificantBitsCountOffset = chunkLen - 3
+	varbitCountOffsetBitOffset           = ChunkLen - 9
+	varbitLastTimeDeltaOffset            = ChunkLen - 7
+	varbitLastValueDeltaOffset           = ChunkLen - 4
+	varbitLastLeadingZerosCountOffset    = ChunkLen - 4
+	varbitLastSignificantBitsCountOffset = ChunkLen - 3
 
 	varbitFirstSampleBitOffset  uint16 = 0 // Symbolic, don't really read or write here.
 	varbitSecondSampleBitOffset uint16 = 1 // Symbolic, don't really read or write here.
@@ -240,18 +240,18 @@ var varbitWorstCaseBitsPerSample = map[varbitValueEncoding]int{
 type varbitChunk []byte
 
 // newVarbitChunk returns a newly allocated varbitChunk.  For simplicity, all
-// varbit chunks must have the length as determined by the chunkLen constant.
+// varbit chunks must have the length as determined by the ChunkLen constant.
 func newVarbitChunk(enc varbitValueEncoding) *varbitChunk {
-	if chunkLen < varbitMinLength || chunkLen > varbitMaxLength {
+	if ChunkLen < varbitMinLength || ChunkLen > varbitMaxLength {
 		panic(fmt.Errorf(
 			"invalid chunk length of %d bytes, need at least %d bytes and at most %d bytes",
-			chunkLen, varbitMinLength, varbitMaxLength,
+			ChunkLen, varbitMinLength, varbitMaxLength,
 		))
 	}
 	if enc > varbitDirectEncoding {
 		panic(fmt.Errorf("unknown varbit value encoding: %v", enc))
 	}
-	c := make(varbitChunk, chunkLen)
+	c := make(varbitChunk, ChunkLen)
 	c.setValueEncoding(enc)
 	return &c
 }
@@ -320,7 +320,7 @@ func (c varbitChunk) UnmarshalFromBuf(buf []byte) error {
 }
 
 // encoding implements chunk.
-func (c varbitChunk) Encoding() ChunkEncoding { return Varbit }
+func (c varbitChunk) Encoding() Encoding { return Varbit }
 
 // firstTime implements chunk.
 func (c varbitChunk) FirstTime() model.Time {
@@ -548,14 +548,14 @@ func (c *varbitChunk) addLaterSample(s model.SamplePair, offset uint16) ([]Chunk
 	}
 
 	// Analyze worst case, does it fit? If not, set new sample as the last.
-	if int(offset)+varbitWorstCaseBitsPerSample[encoding] > chunkLen*8 {
+	if int(offset)+varbitWorstCaseBitsPerSample[encoding] > ChunkLen*8 {
 		return c.addLastSample(s), nil
 	}
 
 	// Transcoding/overflow decisions first.
 	if encoding == varbitZeroEncoding && s.Value != lastValue {
 		// Cannot go on with zero encoding.
-		if offset > chunkLen*4 {
+		if offset > ChunkLen*4 {
 			// Chunk already half full. Don't transcode, overflow instead.
 			return addToOverflowChunk(c, s)
 		}
@@ -567,7 +567,7 @@ func (c *varbitChunk) addLaterSample(s model.SamplePair, offset uint16) ([]Chunk
 	}
 	if encoding == varbitIntDoubleDeltaEncoding && !isInt32(s.Value-lastValue) {
 		// Cannot go on with int encoding.
-		if offset > chunkLen*4 {
+		if offset > ChunkLen*4 {
 			// Chunk already half full. Don't transcode, overflow instead.
 			return addToOverflowChunk(c, s)
 		}
