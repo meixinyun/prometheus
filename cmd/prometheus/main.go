@@ -56,7 +56,7 @@ import (
 	"github.com/prometheus/prometheus/storage/remote"
 	"github.com/prometheus/prometheus/storage/tsdb"
 	"github.com/prometheus/prometheus/util/strutil"
-	"github.com/prometheus/prometheus/web"
+	"github.com/meixinyun/prometheus/web"
 )
 
 var (
@@ -555,21 +555,6 @@ func main() {
 				close(cancel)
 			},
 		)
-	}
-	// add recevier for other prometheus server remote write
-	{
-		cancle :=make(chan struct{})
-		g.Add(func() error {
-
-
-			return nil
-		},
-		func(e error) {
-
-
-			close(cancle)
-		},)
-
 	}
 	{
 		// Web handler.

@@ -245,6 +245,7 @@ func New(logger log.Logger, o *Options) *Handler {
 
 	router.Get("/alerts", readyf(h.alerts))
 	router.Get("/graph", readyf(h.graph))
+
 	router.Get("/status", readyf(h.status))
 	router.Get("/flags", readyf(h.flags))
 	router.Get("/config", readyf(h.serveConfig))
