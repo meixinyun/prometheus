@@ -14,12 +14,12 @@
 package relabel
 
 import (
-	"reflect"
 	"testing"
 
 	"github.com/prometheus/common/model"
 
 	"github.com/prometheus/prometheus/config"
+	"github.com/prometheus/prometheus/util/testutil"
 )
 
 func TestRelabel(t *testing.T) {
@@ -38,7 +38,7 @@ func TestRelabel(t *testing.T) {
 				{
 					SourceLabels: model.LabelNames{"a"},
 					Regex:        config.MustNewRegexp("f(.*)"),
-					TargetLabel:  model.LabelName("d"),
+					TargetLabel:  "d",
 					Separator:    ";",
 					Replacement:  "ch${1}-ch${1}",
 					Action:       config.RelabelReplace,
@@ -61,7 +61,7 @@ func TestRelabel(t *testing.T) {
 				{
 					SourceLabels: model.LabelNames{"a", "b"},
 					Regex:        config.MustNewRegexp("f(.*);(.*)r"),
-					TargetLabel:  model.LabelName("a"),
+					TargetLabel:  "a",
 					Separator:    ";",
 					Replacement:  "b${1}${2}m", // boobam
 					Action:       config.RelabelReplace,
@@ -69,7 +69,7 @@ func TestRelabel(t *testing.T) {
 				{
 					SourceLabels: model.LabelNames{"c", "a"},
 					Regex:        config.MustNewRegexp("(b).*b(.*)ba(.*)"),
-					TargetLabel:  model.LabelName("d"),
+					TargetLabel:  "d",
 					Separator:    ";",
 					Replacement:  "$1$2$2$3",
 					Action:       config.RelabelReplace,
@@ -94,7 +94,7 @@ func TestRelabel(t *testing.T) {
 				}, {
 					SourceLabels: model.LabelNames{"a"},
 					Regex:        config.MustNewRegexp("f(.*)"),
-					TargetLabel:  model.LabelName("d"),
+					TargetLabel:  "d",
 					Separator:    ";",
 					Replacement:  "ch$1-ch$1",
 					Action:       config.RelabelReplace,
@@ -124,7 +124,7 @@ func TestRelabel(t *testing.T) {
 				{
 					SourceLabels: model.LabelNames{"a"},
 					Regex:        config.MustNewRegexp(".*(b).*"),
-					TargetLabel:  model.LabelName("d"),
+					TargetLabel:  "d",
 					Separator:    ";",
 					Replacement:  "$1",
 					Action:       config.RelabelReplace,
@@ -202,7 +202,7 @@ func TestRelabel(t *testing.T) {
 				{
 					SourceLabels: model.LabelNames{"a"},
 					Regex:        config.MustNewRegexp("f"),
-					TargetLabel:  model.LabelName("b"),
+					TargetLabel:  "b",
 					Replacement:  "bar",
 					Action:       config.RelabelReplace,
 				},
@@ -220,7 +220,7 @@ func TestRelabel(t *testing.T) {
 			relabel: []*config.RelabelConfig{
 				{
 					SourceLabels: model.LabelNames{"c"},
-					TargetLabel:  model.LabelName("d"),
+					TargetLabel:  "d",
 					Separator:    ";",
 					Action:       config.RelabelHashMod,
 					Modulus:      1000,
@@ -277,13 +277,143 @@ func TestRelabel(t *testing.T) {
 				"my_baz":        "bbb",
 			},
 		},
+		{ // valid case
+			input: model.LabelSet{
+				"a": "some-name-value",
+			},
+			relabel: []*config.RelabelConfig{
+				{
+					SourceLabels: model.LabelNames{"a"},
+					Regex:        config.MustNewRegexp("some-([^-]+)-([^,]+)"),
+					Action:       config.RelabelReplace,
+					Replacement:  "${2}",
+					TargetLabel:  "${1}",
+				},
+			},
+			output: model.LabelSet{
+				"a":    "some-name-value",
+				"name": "value",
+			},
+		},
+		{ // invalid replacement ""
+			input: model.LabelSet{
+				"a": "some-name-value",
+			},
+			relabel: []*config.RelabelConfig{
+				{
+					SourceLabels: model.LabelNames{"a"},
+					Regex:        config.MustNewRegexp("some-([^-]+)-([^,]+)"),
+					Action:       config.RelabelReplace,
+					Replacement:  "${3}",
+					TargetLabel:  "${1}",
+				},
+			},
+			output: model.LabelSet{
+				"a": "some-name-value",
+			},
+		},
+		{ // invalid target_labels
+			input: model.LabelSet{
+				"a": "some-name-value",
+			},
+			relabel: []*config.RelabelConfig{
+				{
+					SourceLabels: model.LabelNames{"a"},
+					Regex:        config.MustNewRegexp("some-([^-]+)-([^,]+)"),
+					Action:       config.RelabelReplace,
+					Replacement:  "${1}",
+					TargetLabel:  "${3}",
+				},
+				{
+					SourceLabels: model.LabelNames{"a"},
+					Regex:        config.MustNewRegexp("some-([^-]+)-([^,]+)"),
+					Action:       config.RelabelReplace,
+					Replacement:  "${1}",
+					TargetLabel:  "0${3}",
+				},
+				{
+					SourceLabels: model.LabelNames{"a"},
+					Regex:        config.MustNewRegexp("some-([^-]+)-([^,]+)"),
+					Action:       config.RelabelReplace,
+					Replacement:  "${1}",
+					TargetLabel:  "-${3}",
+				},
+			},
+			output: model.LabelSet{
+				"a": "some-name-value",
+			},
+		},
+		{ // more complex real-life like usecase
+			input: model.LabelSet{
+				"__meta_sd_tags": "path:/secret,job:some-job,label:foo=bar",
+			},
+			relabel: []*config.RelabelConfig{
+				{
+					SourceLabels: model.LabelNames{"__meta_sd_tags"},
+					Regex:        config.MustNewRegexp("(?:.+,|^)path:(/[^,]+).*"),
+					Action:       config.RelabelReplace,
+					Replacement:  "${1}",
+					TargetLabel:  "__metrics_path__",
+				},
+				{
+					SourceLabels: model.LabelNames{"__meta_sd_tags"},
+					Regex:        config.MustNewRegexp("(?:.+,|^)job:([^,]+).*"),
+					Action:       config.RelabelReplace,
+					Replacement:  "${1}",
+					TargetLabel:  "job",
+				},
+				{
+					SourceLabels: model.LabelNames{"__meta_sd_tags"},
+					Regex:        config.MustNewRegexp("(?:.+,|^)label:([^=]+)=([^,]+).*"),
+					Action:       config.RelabelReplace,
+					Replacement:  "${2}",
+					TargetLabel:  "${1}",
+				},
+			},
+			output: model.LabelSet{
+				"__meta_sd_tags":   "path:/secret,job:some-job,label:foo=bar",
+				"__metrics_path__": "/secret",
+				"job":              "some-job",
+				"foo":              "bar",
+			},
+		},
+		{
+			input: model.LabelSet{
+				"a":  "foo",
+				"b1": "bar",
+				"b2": "baz",
+			},
+			relabel: []*config.RelabelConfig{
+				{
+					Regex:  config.MustNewRegexp("(b.*)"),
+					Action: config.RelabelLabelKeep,
+				},
+			},
+			output: model.LabelSet{
+				"b1": "bar",
+				"b2": "baz",
+			},
+		},
+		{
+			input: model.LabelSet{
+				"a":  "foo",
+				"b1": "bar",
+				"b2": "baz",
+			},
+			relabel: []*config.RelabelConfig{
+				{
+					Regex:  config.MustNewRegexp("(b.*)"),
+					Action: config.RelabelLabelDrop,
+				},
+			},
+			output: model.LabelSet{
+				"a": "foo",
+			},
+		},
 	}
 
-	for i, test := range tests {
+	for _, test := range tests {
 		res := Process(test.input, test.relabel...)
-
-		if !reflect.DeepEqual(res, test.output) {
-			t.Errorf("Test %d: relabel output mismatch: expected %#v, got %#v", i+1, test.output, res)
-		}
+		testutil.Equals(t, res, test.output)
 	}
 }
