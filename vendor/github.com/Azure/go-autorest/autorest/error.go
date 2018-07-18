@@ -1,5 +1,19 @@
 package autorest
 
+// Copyright 2017 Microsoft Corporation
+//
+//  Licensed under the Apache License, Version 2.0 (the "License");
+//  you may not use this file except in compliance with the License.
+//  You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+//  Unless required by applicable law or agreed to in writing, software
+//  distributed under the License is distributed on an "AS IS" BASIS,
+//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//  See the License for the specific language governing permissions and
+//  limitations under the License.
+
 import (
 	"fmt"
 	"net/http"
@@ -24,10 +38,16 @@ type DetailedError struct {
 	Method string
 
 	// StatusCode is the HTTP Response StatusCode (if non-zero) that led to the error.
-	StatusCode int
+	StatusCode interface{}
 
 	// Message is the error message.
 	Message string
+
+	// Service Error is the response body of failed API in bytes
+	ServiceError []byte
+
+	// Response is the response object that was returned during failure if applicable.
+	Response *http.Response
 }
 
 // NewError creates a new Error conforming object from the passed packageType, method, and
@@ -57,12 +77,14 @@ func NewErrorWithError(original error, packageType string, method string, resp *
 	if resp != nil {
 		statusCode = resp.StatusCode
 	}
+
 	return DetailedError{
 		Original:    original,
 		PackageType: packageType,
 		Method:      method,
 		StatusCode:  statusCode,
 		Message:     fmt.Sprintf(message, args...),
+		Response:    resp,
 	}
 }
 
@@ -70,7 +92,7 @@ func NewErrorWithError(original error, packageType string, method string, resp *
 // StatusCode, Message, and original error (if any)).
 func (e DetailedError) Error() string {
 	if e.Original == nil {
-		return fmt.Sprintf("%s:%s %v %s", e.PackageType, e.Method, e.StatusCode, e.Message)
+		return fmt.Sprintf("%s#%s: %s: StatusCode=%d", e.PackageType, e.Method, e.Message, e.StatusCode)
 	}
-	return fmt.Sprintf("%s:%s %v %s -- Original Error: %v", e.PackageType, e.Method, e.StatusCode, e.Message, e.Original)
+	return fmt.Sprintf("%s#%s: %s: StatusCode=%d -- Original Error: %v", e.PackageType, e.Method, e.Message, e.StatusCode, e.Original)
 }

@@ -9,6 +9,42 @@
           <th>Uptime</th>
           <td>{{.Birth.UTC}}</td>
         </tr>
+        <tr>
+          <th>Working Directory</th>
+          <td>{{.CWD}}</td>
+        </tr>
+        <tr{{if not .ReloadConfigSuccess}} class="danger"{{end}}>
+          <th>Configuration reload</th>
+          <td>{{if .ReloadConfigSuccess}}Successful{{else}}Failed{{end}}</td>
+        </tr>
+        <tr>
+          <th>Last successful configuration reload</th>
+          <td>{{.LastConfigTime.UTC}}</td>
+        </tr>
+        <tr>
+          <th>Head chunks</th>
+          <td>{{.ChunkCount}}</td>
+        </tr>
+        <tr>
+          <th>Head time series</th>
+          <td>{{.TimeSeriesCount}}</td>
+        </tr>
+        <tr>
+          <th>WAL corruptions</th>
+          <td>{{.CorruptionCount}}</td>
+        </tr>
+        <tr>
+          <th>Goroutines</th>
+          <td>{{.GoroutineCount}}</td>
+        </tr>
+        <tr>
+          <th>GOMAXPROCS</th>
+          <td>{{.GOMAXPROCS}}</td>
+        </tr>
+        <tr>
+          <th>GOGC</th>
+          <td>{{.GOGC}}</td>
+        </tr>
       </tbody>
     </table>
 
@@ -41,5 +77,21 @@
         </tr>
       </tbody>
     </table>
+
+    <h2 id="alertmanagers">Alertmanagers</h2>
+    <table class="table table-condensed table-bordered table-striped table-hover">
+      <tbody>
+        <tr>
+           <th>Endpoint</th>
+        </tr>
+        {{range .Alertmanagers}}
+        <tr>
+          {{/* Alertmanager URLs always have Scheme, Host and Path set */}}
+          <td>{{.Scheme}}://<a href="{{.Scheme}}://{{.Host}}">{{.Host}}</a>{{.Path}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+
   </div>
 {{end}}

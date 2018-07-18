@@ -14,26 +14,32 @@
 package remote
 
 import (
+	"context"
 	"fmt"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/config"
+	"github.com/prometheus/prometheus/prompb"
 )
 
+const defaultFlushDeadline = 1 * time.Minute
+
 type TestStorageClient struct {
-	receivedSamples map[string]model.Samples
-	expectedSamples map[string]model.Samples
+	receivedSamples map[string][]*prompb.Sample
+	expectedSamples map[string][]*prompb.Sample
 	wg              sync.WaitGroup
 	mtx             sync.Mutex
 }
 
 func NewTestStorageClient() *TestStorageClient {
 	return &TestStorageClient{
-		receivedSamples: map[string]model.Samples{},
-		expectedSamples: map[string]model.Samples{},
+		receivedSamples: map[string][]*prompb.Sample{},
+		expectedSamples: map[string][]*prompb.Sample{},
 	}
 }
 
@@ -41,9 +47,15 @@ func (c *TestStorageClient) expectSamples(ss model.Samples) {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 
+	c.expectedSamples = map[string][]*prompb.Sample{}
+	c.receivedSamples = map[string][]*prompb.Sample{}
+
 	for _, s := range ss {
-		ts := s.Metric.String()
-		c.expectedSamples[ts] = append(c.expectedSamples[ts], s)
+		ts := labelProtosToLabels(MetricToLabelProtos(s.Metric)).String()
+		c.expectedSamples[ts] = append(c.expectedSamples[ts], &prompb.Sample{
+			Timestamp: int64(s.Timestamp),
+			Value:     float64(s.Value),
+		})
 	}
 	c.wg.Add(len(ss))
 }
@@ -54,23 +66,24 @@ func (c *TestStorageClient) waitForExpectedSamples(t *testing.T) {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	for ts, expectedSamples := range c.expectedSamples {
-		for i, expected := range expectedSamples {
-			if !expected.Equal(c.receivedSamples[ts][i]) {
-				t.Fatalf("%d. Expected %v, got %v", i, expected, c.receivedSamples[ts][i])
-			}
+		if !reflect.DeepEqual(expectedSamples, c.receivedSamples[ts]) {
+			t.Fatalf("%s: Expected %v, got %v", ts, expectedSamples, c.receivedSamples[ts])
 		}
 	}
 }
 
-func (c *TestStorageClient) Store(ss model.Samples) error {
+func (c *TestStorageClient) Store(_ context.Context, req *prompb.WriteRequest) error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
-
-	for _, s := range ss {
-		ts := s.Metric.String()
-		c.receivedSamples[ts] = append(c.receivedSamples[ts], s)
+	count := 0
+	for _, ts := range req.Timeseries {
+		labels := labelProtosToLabels(ts.Labels).String()
+		for _, sample := range ts.Samples {
+			count++
+			c.receivedSamples[labels] = append(c.receivedSamples[labels], sample)
+		}
 	}
-	c.wg.Add(-len(ss))
+	c.wg.Add(-count)
 	return nil
 }
 
@@ -81,9 +94,7 @@ func (c *TestStorageClient) Name() string {
 func TestSampleDelivery(t *testing.T) {
 	// Let's create an even number of send batches so we don't run into the
 	// batch timeout case.
-	cfg := defaultConfig
-	n := cfg.QueueCapacity * 2
-	cfg.Shards = 1
+	n := config.DefaultQueueConfig.Capacity * 2
 
 	samples := make(model.Samples, 0, n)
 	for i := 0; i < n; i++ {
@@ -98,7 +109,10 @@ func TestSampleDelivery(t *testing.T) {
 
 	c := NewTestStorageClient()
 	c.expectSamples(samples[:len(samples)/2])
-	m := NewStorageQueueManager(c, &cfg)
+
+	cfg := config.DefaultQueueConfig
+	cfg.MaxShards = 1
+	m := NewQueueManager(nil, cfg, nil, nil, c, defaultFlushDeadline)
 
 	// These should be received by the client.
 	for _, s := range samples[:len(samples)/2] {
@@ -114,12 +128,47 @@ func TestSampleDelivery(t *testing.T) {
 	c.waitForExpectedSamples(t)
 }
 
+func TestSampleDeliveryTimeout(t *testing.T) {
+	// Let's send one less sample than batch size, and wait the timeout duration
+	n := config.DefaultQueueConfig.Capacity - 1
+
+	samples := make(model.Samples, 0, n)
+	for i := 0; i < n; i++ {
+		name := model.LabelValue(fmt.Sprintf("test_metric_%d", i))
+		samples = append(samples, &model.Sample{
+			Metric: model.Metric{
+				model.MetricNameLabel: name,
+			},
+			Value: model.SampleValue(i),
+		})
+	}
+
+	c := NewTestStorageClient()
+
+	cfg := config.DefaultQueueConfig
+	cfg.MaxShards = 1
+	cfg.BatchSendDeadline = 100 * time.Millisecond
+	m := NewQueueManager(nil, cfg, nil, nil, c, defaultFlushDeadline)
+	m.Start()
+	defer m.Stop()
+
+	// Send the samples twice, waiting for the samples in the meantime.
+	c.expectSamples(samples)
+	for _, s := range samples {
+		m.Append(s)
+	}
+	c.waitForExpectedSamples(t)
+
+	c.expectSamples(samples)
+	for _, s := range samples {
+		m.Append(s)
+	}
+	c.waitForExpectedSamples(t)
+}
+
 func TestSampleDeliveryOrder(t *testing.T) {
-	cfg := defaultConfig
 	ts := 10
-	n := cfg.MaxSamplesPerSend * ts
-	// Ensure we don't drop samples in this test.
-	cfg.QueueCapacity = n
+	n := config.DefaultQueueConfig.MaxSamplesPerSend * ts
 
 	samples := make(model.Samples, 0, n)
 	for i := 0; i < n; i++ {
@@ -135,7 +184,7 @@ func TestSampleDeliveryOrder(t *testing.T) {
 
 	c := NewTestStorageClient()
 	c.expectSamples(samples)
-	m := NewStorageQueueManager(c, &cfg)
+	m := NewQueueManager(nil, config.DefaultQueueConfig, nil, nil, c, defaultFlushDeadline)
 
 	// These should be received by the client.
 	for _, s := range samples {
@@ -163,9 +212,12 @@ func NewTestBlockedStorageClient() *TestBlockingStorageClient {
 	}
 }
 
-func (c *TestBlockingStorageClient) Store(s model.Samples) error {
+func (c *TestBlockingStorageClient) Store(ctx context.Context, _ *prompb.WriteRequest) error {
 	atomic.AddUint64(&c.numCalls, 1)
-	<-c.block
+	select {
+	case <-c.block:
+	case <-ctx.Done():
+	}
 	return nil
 }
 
@@ -181,9 +233,11 @@ func (c *TestBlockingStorageClient) Name() string {
 	return "testblockingstorageclient"
 }
 
-func (t *StorageQueueManager) queueLen() int {
+func (t *QueueManager) queueLen() int {
+	t.shardsMtx.Lock()
+	defer t.shardsMtx.Unlock()
 	queueLength := 0
-	for _, shard := range t.shards {
+	for _, shard := range t.shards.queues {
 		queueLength += len(shard)
 	}
 	return queueLength
@@ -194,9 +248,7 @@ func TestSpawnNotMoreThanMaxConcurrentSendsGoroutines(t *testing.T) {
 	// `MaxSamplesPerSend*Shards` samples should be consumed by the
 	// per-shard goroutines, and then another `MaxSamplesPerSend`
 	// should be left on the queue.
-	cfg := defaultConfig
-	n := cfg.MaxSamplesPerSend*cfg.Shards + cfg.MaxSamplesPerSend
-	cfg.QueueCapacity = n
+	n := config.DefaultQueueConfig.MaxSamplesPerSend * 2
 
 	samples := make(model.Samples, 0, n)
 	for i := 0; i < n; i++ {
@@ -210,7 +262,10 @@ func TestSpawnNotMoreThanMaxConcurrentSendsGoroutines(t *testing.T) {
 	}
 
 	c := NewTestBlockedStorageClient()
-	m := NewStorageQueueManager(c, &cfg)
+	cfg := config.DefaultQueueConfig
+	cfg.MaxShards = 1
+	cfg.Capacity = n
+	m := NewQueueManager(nil, cfg, nil, nil, c, defaultFlushDeadline)
 
 	m.Start()
 
@@ -239,14 +294,37 @@ func TestSpawnNotMoreThanMaxConcurrentSendsGoroutines(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	if m.queueLen() != cfg.MaxSamplesPerSend {
-		t.Fatalf("Failed to drain StorageQueueManager queue, %d elements left",
+	if m.queueLen() != config.DefaultQueueConfig.MaxSamplesPerSend {
+		t.Fatalf("Failed to drain QueueManager queue, %d elements left",
 			m.queueLen(),
 		)
 	}
 
 	numCalls := c.NumCalls()
-	if numCalls != uint64(cfg.Shards) {
-		t.Errorf("Saw %d concurrent sends, expected %d", numCalls, cfg.Shards)
+	if numCalls != uint64(1) {
+		t.Errorf("Saw %d concurrent sends, expected 1", numCalls)
+	}
+}
+
+func TestShutdown(t *testing.T) {
+	deadline := 10 * time.Second
+	c := NewTestBlockedStorageClient()
+	m := NewQueueManager(nil, config.DefaultQueueConfig, nil, nil, c, deadline)
+	for i := 0; i < config.DefaultQueueConfig.MaxSamplesPerSend; i++ {
+		m.Append(&model.Sample{
+			Metric: model.Metric{
+				model.MetricNameLabel: model.LabelValue(fmt.Sprintf("test_metric_%d", i)),
+			},
+			Value:     model.SampleValue(i),
+			Timestamp: model.Time(i),
+		})
+	}
+	m.Start()
+
+	start := time.Now()
+	m.Stop()
+	duration := time.Now().Sub(start)
+	if duration > deadline+(deadline/10) {
+		t.Errorf("Took too long to shutdown: %s > %s", duration, deadline)
 	}
 }

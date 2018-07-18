@@ -22,6 +22,19 @@ eval instant at 50m 2 - SUM(http_requests) BY (job)
 	{job="api-server"} -998
 	{job="app-server"} -2598
 
+eval instant at 50m -http_requests{job="api-server",instance="0",group="production"}
+  {job="api-server",instance="0",group="production"} -100
+
+eval instant at 50m +http_requests{job="api-server",instance="0",group="production"}
+  http_requests{job="api-server",instance="0",group="production"} 100
+
+eval instant at 50m - - - SUM(http_requests) BY (job)
+	{job="api-server"} -1000
+	{job="app-server"} -2600
+
+eval instant at 50m - - - 1
+  -1
+
 eval instant at 50m 1000 / SUM(http_requests) BY (job)
 	{job="api-server"} 1
 	{job="app-server"} 0.38461538461538464
@@ -33,6 +46,10 @@ eval instant at 50m SUM(http_requests) BY (job) - 2
 eval instant at 50m SUM(http_requests) BY (job) % 3
 	{job="api-server"} 1
 	{job="app-server"} 2
+
+eval instant at 50m SUM(http_requests) BY (job) % 0.3
+	{job="api-server"} 0.1
+	{job="app-server"} 0.2
 
 eval instant at 50m SUM(http_requests) BY (job) ^ 2
 	{job="api-server"} 1000000
@@ -231,6 +248,9 @@ eval instant at 50m 0 == bool 1
 
 eval instant at 50m 1 == bool 1
 	1
+
+eval instant at 50m http_requests{job="api-server", instance="0", group="production"} == bool 100
+	{job="api-server", instance="0", group="production"} 1
 
 # group_left/group_right.
 

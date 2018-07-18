@@ -50,6 +50,15 @@ eval instant at 50m changes(http_requests[50m])
 
 eval instant at 50m changes(nonexistent_metric[50m])
 
+clear
+
+load 5m
+  x{a="b"} NaN NaN NaN
+  x{a="c"} 0 NaN 0
+
+eval instant at 15m changes(x[15m])
+  {a="b"} 0
+  {a="c"} 2
 
 clear
 
@@ -214,14 +223,69 @@ eval_fail instant at 0m label_replace(testmetric, "src", "", "", "")
 
 clear
 
+# Tests for vector, time and timestamp.
+load 10s
+  metric 1 1
+
+eval instant at 0s timestamp(metric)
+  {} 0
+
+eval instant at 5s timestamp(metric)
+  {} 0
+
+eval instant at 10s timestamp(metric)
+  {} 10
+
+# Tests for label_join.
+load 5m
+  testmetric{src="a",src1="b",src2="c",dst="original-destination-value"} 0
+  testmetric{src="d",src1="e",src2="f",dst="original-destination-value"} 1
+
+# label_join joins all src values in order.
+eval instant at 0m label_join(testmetric, "dst", "-", "src", "src1", "src2")
+  testmetric{src="a",src1="b",src2="c",dst="a-b-c"} 0
+  testmetric{src="d",src1="e",src2="f",dst="d-e-f"} 1
+
+# label_join treats non existent src labels as empty strings.
+eval instant at 0m label_join(testmetric, "dst", "-", "src", "src3", "src1")
+  testmetric{src="a",src1="b",src2="c",dst="a--b"} 0
+  testmetric{src="d",src1="e",src2="f",dst="d--e"} 1
+
+# label_join overwrites the destination label even if the resulting dst label is empty string
+eval instant at 0m label_join(testmetric, "dst", "", "emptysrc", "emptysrc1", "emptysrc2")
+  testmetric{src="a",src1="b",src2="c"} 0
+  testmetric{src="d",src1="e",src2="f"} 1
+
+# test without src label for label_join
+eval instant at 0m label_join(testmetric, "dst", ", ")
+	  testmetric{src="a",src1="b",src2="c"} 0
+	  testmetric{src="d",src1="e",src2="f"} 1
+
+# test without dst label for label_join
+load 5m
+  testmetric1{src="foo",src1="bar",src2="foobar"} 0
+  testmetric1{src="fizz",src1="buzz",src2="fizzbuzz"} 1
+
+# label_join creates dst label if not present.
+eval instant at 0m label_join(testmetric1, "dst", ", ", "src", "src1", "src2")
+  testmetric1{src="foo",src1="bar",src2="foobar",dst="foo, bar, foobar"} 0
+  testmetric1{src="fizz",src1="buzz",src2="fizzbuzz",dst="fizz, buzz, fizzbuzz"} 1
+
+clear
+
 # Tests for vector.
 eval instant at 0m vector(1)
   {} 1
 
+eval instant at 0s vector(time())
+  {} 0
+
+eval instant at 5s vector(time())
+  {} 5
+
 eval instant at 60m vector(time())
   {} 3600
 
-clear
 
 # Tests for clamp_max and clamp_min().
 load 5m
@@ -370,6 +434,9 @@ clear
 eval instant at 0m year()
   {} 1970
 
+eval instant at 1ms time()
+  0.001
+
 eval instant at 0m year(vector(1136239445))
   {} 2006
 
@@ -427,3 +494,4 @@ eval instant at 0m days_in_month(vector(1454284800))
 # Febuary 1st 2017 not in leap year.
 eval instant at 0m days_in_month(vector(1485907200))
   {} 28
+
