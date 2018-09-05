@@ -1,0 +1,8 @@
+ALERT KafkaInstanceDown
+IF up{instance=~"10.204.56.18:7071|10.204.56.19:7071|10.204.56.20:7071"} == 0
+FOR 5m
+LABELS { severity = "upallas",sender="email,wechat,sms",service="upallas-kafka-monitor" }
+ANNOTATIONS {
+	summary = "upallas  kafka  Instance {{ $labels.instance }} down",
+        description = "upallas kafka Instance {{ $labels.instance }} of job {{ $labels.job }} has been down for more than 5 minutes.",
+}

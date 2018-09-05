@@ -432,11 +432,9 @@ type scraper interface {
 // targetScraper implements the scraper interface for a target.
 type targetScraper struct {
 	*Target
-
 	client  *http.Client
 	req     *http.Request
 	timeout time.Duration
-
 	gzipr *gzip.Reader
 	buf   *bufio.Reader
 }

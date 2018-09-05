@@ -65,9 +65,9 @@ import (
 	"github.com/prometheus/prometheus/template"
 	"github.com/prometheus/prometheus/util/httputil"
 	api_v1 "github.com/prometheus/prometheus/web/api/v1"
-	api_v2 "github.com/prometheus/prometheus/web/api/v2"
+	"github.com/prometheus/prometheus/web/api/v2"
 	"github.com/prometheus/prometheus/web/ui"
-	"github.com/pkg/errors"
+	"github.com/prometheus/prometheus/receiver"
 	"github.com/golang/snappy"
 	"github.com/prometheus/prometheus/prompb"
 	"github.com/gogo/protobuf/proto"
@@ -92,36 +92,48 @@ var (
 		},
 		[]string{"handler"},
 	)
+
+
+	msgReceivedFromTransfer = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "umonibench_received_msg_from_transfer_total",
+			Help: "Total number of samples received from transfer",
+		},
+
+	)
+
 )
 
 func init() {
+
 	prometheus.MustRegister(requestDuration, responseSize)
+	prometheus.MustRegister(msgReceivedFromTransfer)
+
 }
 
 // Handler serves various HTTP endpoints of the Prometheus server
 type Handler struct {
-	logger log.Logger
-
-	scrapeManager *scrape.Manager
-	ruleManager   *rules.Manager
-	queryEngine   *promql.Engine
-	context       context.Context
-	tsdb          func() *tsdb.DB
-	storage       storage.Storage
-	notifier      *notifier.Manager
-
-	apiV1 *api_v1.API
-
-	router       *route.Router
-	quitCh       chan struct{}
-	reloadCh     chan chan error
-	options      *Options
-	config       *config.Config
-	configString string
-	versionInfo  *PrometheusVersion
-	birth        time.Time
-	cwd          string
-	flagsMap     map[string]string
+	logger          log.Logger
+	scrapeManager   *scrape.Manager
+	ruleManager     *rules.Manager
+	queryEngine     *promql.Engine
+	context         context.Context
+	tsdb            func() *tsdb.DB
+	storage         storage.Storage
+	notifier        *notifier.Manager
+	receiverChannel chan []receiver.Sample
+	receiverLoop    *receiver.ReceiverLoop
+	apiV1           *api_v1.API
+	router          *route.Router
+	quitCh          chan struct{}
+	reloadCh        chan chan error
+	options         *Options
+	config          *config.Config
+	configString    string
+	versionInfo     *PrometheusVersion
+	birth           time.Time
+	cwd             string
+	flagsMap        map[string]string
 
 	externalLabels model.LabelSet
 	mtx            sync.RWMutex
@@ -136,7 +148,6 @@ func (h *Handler) ApplyConfig(conf *config.Config) error {
 	defer h.mtx.Unlock()
 
 	h.config = conf
-
 	return nil
 }
 
@@ -152,16 +163,16 @@ type PrometheusVersion struct {
 
 // Options for the web Handler.
 type Options struct {
-	Context       context.Context
-	TSDB          func() *tsdb.DB
-	Storage       storage.Storage
-	QueryEngine   *promql.Engine
-	ScrapeManager *scrape.Manager
-	RuleManager   *rules.Manager
-	Notifier      *notifier.Manager
-	Version       *PrometheusVersion
-	Flags         map[string]string
-
+	Context              context.Context
+	TSDB                 func() *tsdb.DB
+	Storage              storage.Storage
+	QueryEngine          *promql.Engine
+	ScrapeManager        *scrape.Manager
+	RuleManager          *rules.Manager
+	Notifier             *notifier.Manager
+	Version              *PrometheusVersion
+	Flags                map[string]string
+	ReceiverChannel      chan []receiver.Sample
 	ListenAddress        string
 	ReadTimeout          time.Duration
 	MaxConnections       int
@@ -198,23 +209,23 @@ func New(logger log.Logger, o *Options) *Handler {
 	}
 
 	h := &Handler{
-		logger:      logger,
-		router:      router,
-		quitCh:      make(chan struct{}),
-		reloadCh:    make(chan chan error),
-		options:     o,
-		versionInfo: o.Version,
-		birth:       time.Now(),
-		cwd:         cwd,
-		flagsMap:    o.Flags,
-
-		context:       o.Context,
-		scrapeManager: o.ScrapeManager,
-		ruleManager:   o.RuleManager,
-		queryEngine:   o.QueryEngine,
-		tsdb:          o.TSDB,
-		storage:       o.Storage,
-		notifier:      o.Notifier,
+		logger:          logger,
+		router:          router,
+		quitCh:          make(chan struct{}),
+		reloadCh:        make(chan chan error),
+		options:         o,
+		versionInfo:     o.Version,
+		birth:           time.Now(),
+		cwd:             cwd,
+		flagsMap:        o.Flags,
+		receiverChannel: o.ReceiverChannel,
+		context:         o.Context,
+		scrapeManager:   o.ScrapeManager,
+		ruleManager:     o.RuleManager,
+		queryEngine:     o.QueryEngine,
+		tsdb:            o.TSDB,
+		storage:         o.Storage,
+		notifier:        o.Notifier,
 
 		now: model.Now,
 
@@ -231,7 +242,13 @@ func New(logger log.Logger, o *Options) *Handler {
 		h.testReady,
 		h.options.TSDB,
 		h.options.EnableAdminAPI,
+		logger,
+		h.ruleManager,
 	)
+
+
+	h.receiverLoop = receiver.NewReceiverLoop(o.ReceiverChannel, o.Storage, log.With(logger,"module","Receiver"))
+
 
 	if o.RoutePrefix != "/" {
 		// If the prefix is missing for the root path, prepend it.
@@ -269,11 +286,11 @@ func New(logger log.Logger, o *Options) *Handler {
 
 	router.Get("/static/*filepath", h.serveStaticAsset)
 
+	router.Post("/receive", readyf(h.receiverIngestion))
+
 	if o.UserAssetsPath != "" {
 		router.Get("/user/*filepath", route.FileServe(o.UserAssetsPath))
 	}
-
-	router.Post("/receive", h.receiverIngestion)
 
 	if o.EnableLifecycle {
 		router.Post("/-/quit", h.quit)
@@ -376,6 +393,44 @@ func (h *Handler) serveStaticAsset(w http.ResponseWriter, req *http.Request) {
 	}
 
 	http.ServeContent(w, req, info.Name(), info.ModTime(), bytes.NewReader(file))
+}
+
+func (h *Handler) receiverIngestion(w http.ResponseWriter, r *http.Request) {
+
+	compressed, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	reqBuf, err := snappy.Decode(nil, compressed)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var req prompb.WriteRequest
+	if err := proto.Unmarshal(reqBuf, &req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	scrape := make([]receiver.Sample,len(req.GetTimeseries()))
+	for _, ts := range req.GetTimeseries() {
+		m := make(labels.Labels, 0, len(ts.Labels))
+		for _, l := range ts.Labels {
+			m = append(m, labels.Label{Name: l.Name, Value: l.Value})
+		}
+		for _, s := range ts.Samples {
+			scrape = append(scrape, receiver.Sample{
+				Labels: m,
+				Ts:     s.Timestamp,
+				Value:  s.Value,
+			})
+			msgReceivedFromTransfer.Inc()
+		}
+	}
+	h.receiverChannel <- scrape
 }
 
 // Ready sets Handler to be ready.
@@ -490,6 +545,9 @@ func (h *Handler) Run(ctx context.Context) error {
 		ReadTimeout: h.options.ReadTimeout,
 	}
 
+	level.Info(h.logger).Log("msg", "ReceiverLoop Start")
+	h.receiverLoop.Start()
+
 	errCh := make(chan error)
 	go func() {
 		errCh <- httpSrv.Serve(httpl)
@@ -500,6 +558,7 @@ func (h *Handler) Run(ctx context.Context) error {
 	go func() {
 		errCh <- m.Serve()
 	}()
+
 
 	select {
 	case e := <-errCh:
@@ -891,91 +950,6 @@ func (h *Handler) dumpHeap(w http.ResponseWriter, r *http.Request) {
 	defer f.Close()
 	pprof_runtime.WriteHeapProfile(f)
 	fmt.Fprintf(w, "Done")
-}
-
-
-func (h *Handler) receiverIngestion(w http.ResponseWriter, r *http.Request) {
-
-	compressed, err := ioutil.ReadAll(r.Body)
-	level.Debug(h.logger).Log("receive1", compressed)
-
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	reqBuf, err := snappy.Decode(nil, compressed)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	level.Debug(h.logger).Log("receive2", reqBuf)
-
-	var req prompb.WriteRequest
-	if err := proto.Unmarshal(reqBuf, &req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	level.Debug(h.logger).Log("receive3", req.String())
-
-	scrape := make([]*sample, 0, len(req.GetTimeseries()))
-	for _, ts := range req.GetTimeseries() {
-		m := make(labels.Labels, 0, len(ts.Labels))
-		for _, l := range ts.Labels {
-			m = append(m, labels.Label{Name: l.Name, Value: l.Value})
-		}
-		for _, s := range ts.Samples {
-			scrape = append(scrape, &sample{
-				labels: m,
-				ts:     s.Timestamp,
-				value:  s.Value,
-			})
-		}
-	}
-	level.Debug(h.logger).Log("scrape len", len(scrape))
-	total := uint64(0)
-
-	app, _ := h.storage.Appender()
-
-	for _, s := range scrape {
-		if s.ref == nil {
-
-			ref, err := app.Add(s.labels, s.ts, s.value)
-			if err != nil {
-				level.Debug(h.logger).Log("appander Add err", err)
-				panic(err)
-			}
-			s.ref = &ref
-		} else if err := app.AddFast(s.labels,*s.ref, s.ts, s.value); err != nil {
-			if errors.Cause(err) != tsdb.ErrNotFound {
-				level.Debug(h.logger).Log("appander AddFast err", err)
-				panic(err)
-			}
-			ref, err := app.Add(s.labels, s.ts, s.value)
-			if err != nil {
-				panic(err)
-			}
-			s.ref = &ref
-		}
-		level.Debug(h.logger).Log("label", s.labels.String(), "ts", s.ts, "value", s.value)
-		total++
-	}
-
-	level.Info(h.logger).Log("receive_data_cnt", total)
-	err = app.Commit()
-	if err != nil {
-		level.Info(h.logger).Log("tsdb store commit ", total)
-	} else {
-		level.Error(h.logger).Log("tsdb  commit  failed", err)
-	}
-
-}
-
-type sample struct {
-	labels labels.Labels
-	value  float64
-	ts     int64
-	ref    *uint64
 }
 
 // AlertStatus bundles alerting rules and the mapping of alert states to row classes.

@@ -54,6 +54,7 @@ type config struct {
 	remoteTimeout           time.Duration
 	listenAddr              string
 	telemetryPath           string
+	logLevel                string
 }
 
 var (
@@ -99,8 +100,7 @@ func main() {
 	http.Handle(cfg.telemetryPath, prometheus.Handler())
 
 	logLevel := promlog.AllowedLevel{}
-	logLevel.Set("debug")
-
+	logLevel.Set(cfg.logLevel)
 	logger := promlog.New(logLevel)
 
 	writers, readers := buildClients(logger, cfg)
@@ -141,6 +141,7 @@ func parseFlags() *config {
 	)
 	flag.StringVar(&cfg.listenAddr, "web.listen-address", ":9201", "Address to listen on for web endpoints.")
 	flag.StringVar(&cfg.telemetryPath, "web.telemetry-path", "/metrics", "Address to listen on for web endpoints.")
+	flag.StringVar(&cfg.logLevel, "log.level", "debug", "Only log messages with the given severity or above. One of: [debug, info, warn, error]")
 
 	flag.Parse()
 
@@ -203,6 +204,8 @@ func buildClients(logger log.Logger, cfg *config) ([]writer, []reader) {
 
 func serve(logger log.Logger, addr string, writers []writer, readers []reader) error {
 	http.HandleFunc("/write", func(w http.ResponseWriter, r *http.Request) {
+
+		level.Info(logger).Log("msg", "WriteCalled")
 		compressed, err := ioutil.ReadAll(r.Body)
 		if err != nil {
 			level.Error(logger).Log("msg", "Read error", "err", err.Error())
@@ -227,11 +230,16 @@ func serve(logger log.Logger, addr string, writers []writer, readers []reader) e
 		samples := protoToSamples(&req)
 		receivedSamples.Add(float64(len(samples)))
 
+		level.Info(logger).Log("msg", "sending samples to remote storage", "samplesLen", len(samples))
+		level.Info(logger).Log("msg", "sending samples to remote storage", "sampleData", samples[0].String())
+
 		var wg sync.WaitGroup
 		for _, w := range writers {
 			wg.Add(1)
 			go func(rw writer) {
+
 				sendSamples(logger, rw, samples)
+
 				wg.Done()
 			}(w)
 		}
@@ -239,7 +247,10 @@ func serve(logger log.Logger, addr string, writers []writer, readers []reader) e
 	})
 
 	http.HandleFunc("/read", func(w http.ResponseWriter, r *http.Request) {
+
+		level.Info(logger).Log("msg", "ReadCalled")
 		compressed, err := ioutil.ReadAll(r.Body)
+
 		if err != nil {
 			level.Error(logger).Log("msg", "Read error", "err", err.Error())
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -260,6 +271,10 @@ func serve(logger log.Logger, addr string, writers []writer, readers []reader) e
 			return
 		}
 
+
+		level.Info(logger).Log("msg", "read request done")
+		level.Info(logger).Log("msg", "read request done ","requst msg",req.String())
+
 		// TODO: Support reading from more than one reader and merging the results.
 		if len(readers) != 1 {
 			http.Error(w, fmt.Sprintf("expected exactly one reader, found %d readers", len(readers)), http.StatusInternalServerError)
@@ -275,6 +290,8 @@ func serve(logger log.Logger, addr string, writers []writer, readers []reader) e
 			return
 		}
 
+
+		level.Info(logger).Log("msg", "read Response data ",resp.String())
 		data, err := proto.Marshal(resp)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -283,7 +300,6 @@ func serve(logger log.Logger, addr string, writers []writer, readers []reader) e
 
 		w.Header().Set("Content-Type", "application/x-protobuf")
 		w.Header().Set("Content-Encoding", "snappy")
-
 		compressed = snappy.Encode(nil, data)
 		if _, err := w.Write(compressed); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -301,6 +317,8 @@ func protoToSamples(req *prompb.WriteRequest) model.Samples {
 		for _, l := range ts.Labels {
 			metric[model.LabelName(l.Name)] = model.LabelValue(l.Value)
 		}
+
+		fmt.Printf("%v", metric)
 
 		for _, s := range ts.Samples {
 			samples = append(samples, &model.Sample{

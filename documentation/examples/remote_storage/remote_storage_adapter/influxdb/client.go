@@ -119,8 +119,12 @@ func (c *Client) Read(req *prompb.ReadRequest) (*prompb.ReadResponse, error) {
 			return nil, err
 		}
 
+		level.Debug(c.logger).Log("msg", "query commond", command)
+
 		query := influx.NewQuery(command, c.database, "ms")
+
 		resp, err := c.client.Query(query)
+
 		if err != nil {
 			return nil, err
 		}
