@@ -17,9 +17,7 @@ import (
 	"crypto/md5"
 	"fmt"
 	"strings"
-
 	"github.com/prometheus/common/model"
-
 	"github.com/prometheus/prometheus/config"
 )
 

@@ -341,17 +341,21 @@ func main() {
 		},
 		func(cfg *config.Config) error {
 			// Get all rule files matching the configuration oaths.
-			var files []string
-			for _, pat := range cfg.RuleFiles {
-				fs, err := filepath.Glob(pat)
-				if err != nil {
-					// The only error can be a bad pattern.
-					return fmt.Errorf("error retrieving rule files for %s: %s", pat, err)
-				}
-				files = append(files, fs...)
+			//var files []string
+			//for _, pat := range cfg.RuleFiles {
+			//	fs, err := filepath.Glob(pat)
+			//	if err != nil {
+			//		// The only error can be a bad pattern
+			//		return fmt.Errorf("error retrieving rule files for %s: %s", pat, err)
+			//	}
+			//	files = append(files, fs...)
+			//}
+
+			var urls []string
+			for _,url :=range cfg.RuleUrls {
+				urls = append(urls,url)
 			}
-			return ruleManager.Update2(time.Duration(cfg.GlobalConfig.EvaluationInterval), "http://10.204.57.246:9333/api/v1/rules")
-			//return ruleManager.Update(time.Duration(cfg.GlobalConfig.EvaluationInterval), files)
+			return ruleManager.Update(time.Duration(cfg.GlobalConfig.EvaluationInterval), urls)
 		},
 	}
 

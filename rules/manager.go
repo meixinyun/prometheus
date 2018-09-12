@@ -626,70 +626,70 @@ func (m *Manager) Stop() {
 
 // Update the rule manager's state as the config requires. If
 // loading the new rules failed the old rule set is restored.
-func (m *Manager) Update(interval time.Duration, files []string) error {
-	m.mtx.Lock()
-	defer m.mtx.Unlock()
-	groups, errs := m.loadGroups(interval, files...)
-	if errs != nil {
-		for _, e := range errs {
-			level.Error(m.logger).Log("msg", "loading groups failed", "err", e)
-		}
-		return errors.New("error loading rules, previous rule set restored")
-	}
-	m.restored = true
-
-	var wg sync.WaitGroup
-
-	for _, newg := range groups {
-		wg.Add(1)
-
-		// If there is an old group with the same identifier, stop it and wait for
-		// it to finish the current iteration. Then copy it into the new group.
-		gn := groupKey(newg.name, newg.file)
-		oldg, ok := m.groups[gn]
-		delete(m.groups, gn)
-
-		go func(newg *Group) {
-			if ok {
-				oldg.stop()
-				newg.CopyState(oldg)
-			}
-			go func() {
-				// Wait with starting evaluation until the rule manager
-				// is told to run. This is necessary to avoid running
-				// queries against a bootstrapping storage.
-				<-m.block
-				newg.run(m.opts.Context)
-			}()
-			wg.Done()
-		}(newg)
-	}
-
-	// Stop remaining old groups.
-	for _, oldg := range m.groups {
-		oldg.stop()
-	}
-
-	wg.Wait()
-	m.groups = groups
-
-	return nil
-}
+//func (m *Manager) Update(interval time.Duration, files []string) error {
+//	m.mtx.Lock()
+//	defer m.mtx.Unlock()
+//	groups, errs := m.loadGroups(interval, files...)
+//	if errs != nil {
+//		for _, e := range errs {
+//			level.Error(m.logger).Log("msg", "loading groups failed", "err", e)
+//		}
+//		return errors.New("error loading rules, previous rule set restored")
+//	}
+//	m.restored = true
+//
+//	var wg sync.WaitGroup
+//
+//	for _, newg := range groups {
+//		wg.Add(1)
+//
+//		// If there is an old group with the same identifier, stop it and wait for
+//		// it to finish the current iteration. Then copy it into the new group.
+//		gn := groupKey(newg.name, newg.file)
+//		oldg, ok := m.groups[gn]
+//		delete(m.groups, gn)
+//
+//		go func(newg *Group) {
+//			if ok {
+//				oldg.stop()
+//				newg.CopyState(oldg)
+//			}
+//			go func() {
+//				// Wait with starting evaluation until the rule manager
+//				// is told to run. This is necessary to avoid running
+//				// queries against a bootstrapping storage.
+//				<-m.block
+//				newg.run(m.opts.Context)
+//			}()
+//			wg.Done()
+//		}(newg)
+//	}
+//
+//	// Stop remaining old groups.
+//	for _, oldg := range m.groups {
+//		oldg.stop()
+//	}
+//
+//	wg.Wait()
+//	m.groups = groups
+//
+//	return nil
+//}
 
 // Update the rule manager's state as the config requires. If
 // loading the new rules failed the old rule set is restored.
-func (m *Manager) Update2(interval time.Duration, url string) error {
+func (m *Manager) Update(interval time.Duration, url []string) error {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
-	groups, errs := m.loadGroupsFromMaster(interval, url)
 
+	groups, errs := m.loadGroupsFromMaster(interval, url)
 	if errs != nil {
-		return errors.New("error loading rules, previous rule set restored")
+		level.Error(m.logger).Log("Update",errs)
+		return errors.New(fmt.Sprintf("%v",errs))
 	}
-	m.restored = true
+
 
 	var wg sync.WaitGroup
-
 	for _, newg := range groups {
 		wg.Add(1)
 
@@ -733,67 +733,76 @@ var userAgentHeader = fmt.Sprintf("Umonibench/%s", version.Version)
 // loadGroups reads groups from a list of files.
 // As there's currently no group syntax a single group named "default" containing
 // all rules will be returned.
-func (m *Manager) loadGroupsFromMaster(interval time.Duration, domain string) (map[string]*Group, error) {
+func (m *Manager) loadGroupsFromMaster(interval time.Duration, domains []string) (map[string]*Group, error) {
 	retGroups := make(map[string]*Group)
+	for _,url :=range domains {
 
-	shouldRestore := !m.restored
-	res, err := httpclient.Get(domain)
-	if err != nil {
-		return nil, nil
-	}
-	bodyString, err := res.ToString()
-	groups_str := gjson.Get(bodyString, "data.groups")
-	if groups_str.Exists() {
-		groups := groups_str.Array()
-		for _, g := range groups {
+		level.Info(m.logger).Log("loadGroupsFromMaster:",url )
+		shouldRestore := true
+		res, err := httpclient.Get(url)
+		if err != nil {
+			return nil, err
+		}
+		bodyString, err := res.ToString()
+		groups_str := gjson.Get(bodyString, "data.groups")
 
-			interval := int(g.Get("interval").Int())
+		if groups_str.Exists() {
+			groups := groups_str.Array()
 
-			gName :=g.Get("name").String()
+			for _, g := range groups {
 
-			rules_str := gjson.Get(g.String(), "rules")
+				level.Info(m.logger).Log("groups:",g.String() )
 
-			if rules_str.Exists() {
+				interval := int(g.Get("interval").Int())
 
-				rules := rules_str.Array()
+				gName :=g.Get("name").String()
 
-				retRules := make([]Rule, 0, len(rules))
+				rules_str := gjson.Get(g.String(), "rules")
 
-				for _, r := range rules {
+				if rules_str.Exists() {
 
-					name := r.Get("name").String()
-					express := r.Get("query").String()
-					duration := interval
-					labs_org :=r.Get("labels").Map()
-					labes :=make(map[string]string,len(labs_org))
-					for k,v :=range labs_org {
-						labes[k] = fmt.Sprintf("%v",v.String())
+					rules := rules_str.Array()
+
+					retRules := make([]Rule, 0, len(rules))
+
+					for _, r := range rules {
+
+						name := r.Get("name").String()
+						express := r.Get("query").String()
+						duration := interval
+						labs_org :=r.Get("labels").Map()
+						labes :=make(map[string]string,len(labs_org))
+						for k,v :=range labs_org {
+							labes[k] = fmt.Sprintf("%v",v.String())
+						}
+						annotation_org := r.Get("annotations").Map()
+						annotation := make(map[string]string,len(annotation_org))
+						for k,v :=range annotation_org {
+							annotation[k] = fmt.Sprintf("%v",v.String())
+						}
+
+						level.Info(m.logger).Log("expression:",express)
+
+						expr, err := promql.ParseExpr(express)
+						if err != nil {
+							return nil, err
+						}
+
+						if name != "" {
+							retRules = append(retRules, NewAlertingRule(name,expr,time.Duration(duration)*time.Second,labels.FromMap(labes),labels.FromMap(annotation),true,log.With(m.logger,"alart",name)))
+							continue
+						}
+						record := r.Get("record").String()
+						if record != "" {
+							retRules = append(retRules, NewRecordingRule(
+								record,
+								expr,
+								labels.FromMap(labes),
+							))
+						}
 					}
-					annotation_org := r.Get("annotations").Map()
-					annotation := make(map[string]string,len(annotation_org))
-					for k,v :=range annotation_org {
-						annotation[k] = fmt.Sprintf("%v",v.String())
-					}
-
-					expr, err := promql.ParseExpr(express)
-					if err != nil {
-						return nil, err
-					}
-
-					if name != "" {
-						retRules = append(retRules, NewAlertingRule(name,expr,time.Duration(duration)*time.Second,labels.FromMap(labes),labels.FromMap(annotation),true,log.With(m.logger,"alart",name)))
-						continue
-					}
-					record := r.Get("record").String()
-					if record != "" {
-						retRules = append(retRules, NewRecordingRule(
-							record,
-							expr,
-							labels.FromMap(labes),
-						))
-					}
+					retGroups[groupKey(gName,url)] = NewGroup(gName, url, time.Duration(interval), retRules, shouldRestore, m.opts)
 				}
-				retGroups[groupKey(gName,"remote")] = NewGroup(gName, "remote", time.Duration(interval), retRules, shouldRestore, m.opts)
 			}
 		}
 	}
