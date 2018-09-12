@@ -6,9 +6,11 @@ global:
 scrape_configs:
   - job_name: 'prometheus'
     static_configs:
-      - targets: ['127.0.0.1:9090']
-        
+      - targets: ['127.0.0.2:9090']
+rule_urls:
+        - 'http://10.104.104.28/accounts/api/v1/rule/' 
+        - 'http://10.204.57.246:9333/api/v1/rules' 
+#remote_write:
+#    - url: http://localhost:9268/write
 #remote_read:
-#- url: "http://127.0.0.1:9201/read"
-# remote_write:
-#   - url: "http://127.0.0.1:9201/write"
+#    - url: http://localhost:9268/read

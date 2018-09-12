@@ -135,6 +135,8 @@ type Config struct {
 	GlobalConfig   GlobalConfig    `yaml:"global"`
 	AlertingConfig AlertingConfig  `yaml:"alerting,omitempty"`
 	RuleFiles      []string        `yaml:"rule_files,omitempty"`
+	RuleUrls       []string        `yaml:"rule_urls,omitempty"`
+
 	ScrapeConfigs  []*ScrapeConfig `yaml:"scrape_configs,omitempty"`
 
 	RemoteWriteConfigs []*RemoteWriteConfig `yaml:"remote_write,omitempty"`
